@@ -1,0 +1,187 @@
+CREATE OR REPLACE FUNCTION function_name(param1 datatype, param2 datatype)
+	RETURNS datatype
+	LANGUAGE plpgsql
+AS
+$$
+DECLARE internal_variable datatype;
+
+BEGIN
+	SELECT CAST(param1 as datatype) * param2 INTO internal_variable
+	RETURN internal_variable
+END;
+$$
+
+CREATE TABLE table_name (column_names datatype)
+
+INSERT INTO table_name
+	SELECT ...
+
+	FROM
+
+-- COMMENT
+
+
+CREATE FUNCTION trigger_function()
+	RETURNS TRIGGER
+	LANGUAGE PLPGSQL
+AS
+$$
+BEGIN
+END
+$$
+
+CREATE OR REPLACE PROCEDURE 
+
+CREATE TRIGGER trigger_name
+	{BEFORE | AFTER} {event} -- events being INSERT, UPDATE, DELETE, or TRUNCATE
+	ON table_name
+	[FOR [EACH] {ROW | STATEMENT}]
+		EXECUTE PROCEDURE trigger_function
+
+Section A: Last time a customer rented
+A1: 
+    Detailed:
+    From Customer Table: customer_id, first_name, last_name
+    From Film: film_id, title
+    From Rental: inventory_id, rental_date, return_date (if applicable), customer_id
+    From Inventory: inventory_id, film_id
+
+    Summary: 
+    From Rental: customer_id, rental_date, return_date (if applicable)
+
+A2: 
+    Detailed:
+    From Customer Table: customer_id (int), first_name (varchar(45)), last_name (varchar(45))
+    From Film: film_id (int), title (varchar(255))
+    From Rental: inventory_id (int), rental_date (timestamp), return_date(timestamp), customer_id(int)
+    From Inventory: inventory_id(int), film_id(smallint)
+
+    Summary:
+    From Rental: customer_id (int), rental_date (timestamp), return date(if applicable) (timestamp)
+A3: Customer, Film, Rental, and invnetory for detailed, only rental for summary
+A4: We don't require the time, so a function will be made to drop that
+A5: The detailed section can be used to create specific customer profiles, as well as determine the most popular films. The summary table can be used to quickly understand if a customer profile should be shut down.
+A6: Weekly, shorter and you may end up missing relevant films, longer and a film's relevancy will drop off. Families will often only rent once a week or longer as well, so shorter periods are likely unnecessary.
+
+
+-- Section B
+CREATE OR REPLACE FUNCTION rental_dateonly (rental_date timestamp)
+RETURNS timestamp
+LANGUAGE plpgsql
+AS
+$$
+DECLARE rent_date timestamp;
+BEGIN
+	return TO_CHAR(rental_date, 'YYYY/MM/DD');
+END;
+$$;
+-- Section B End
+
+-- Section C Start
+DROP TABLE Detailed;
+DROP TABLE Summary;
+
+CREATE TABLE IF NOT EXISTS Detailed (detailed_customer_id int PRIMARY KEY, full_name varchar(91), 
+					   			  film_id int, film_title varchar(255), 
+					   			  inventory_id int, latest_rental timestamp, latest_return timestamp);
+ALTER TABLE Detailed
+ADD FOREIGN KEY (detailed_customer_id) REFERENCES customer(customer_id);
+					   
+CREATE TABLE IF NOT EXISTS Summary (summary_customer_id int PRIMARY KEY, full_name varchar(91), 
+									latest_rental timestamp , latest_return timestamp);
+ALTER TABLE Summary
+ADD FOREIGN KEY (summary_customer_id) REFERENCES customer(customer_id);
+
+--Section C End
+
+--Section D Start
+
+CREATE OR REPLACE FUNCTION insert_data()
+RETURNS void
+LANGUAGE plpgsql
+AS
+$$
+BEGIN
+	INSERT INTO Detailed (detailed_customer_id, full_name)
+		SELECT DISTINCT customer_id, concat(first_name, ' ', last_name)
+	FROM customer
+	WHERE NOT EXISTS (SELECT * FROM Detailed WHERE detailed_customer_id = detailed_customer_id);
+
+	UPDATE Detailed
+		SET latest_rental = (SELECT MAX(rental_date) FROM rental WHERE rental.customer_id = detailed.detailed_customer_id)
+		FROM rental
+		WHERE rental.customer_id = detailed.detailed_customer_id;
+	
+	UPDATE Detailed
+		SET inventory_id = rental.inventory_id 
+		FROM rental 
+		WHERE rental_date = detailed.latest_rental 
+		AND rental.customer_id = detailed.detailed_customer_id;
+
+	UPDATE Detailed
+		SET film_id = inventory.film_id
+		FROM inventory
+		WHERE inventory.inventory_id = detailed.inventory_id;
+
+	UPDATE Detailed
+		SET latest_rental = rental_dateonly(latest_rental);
+	
+	UPDATE Detailed
+		SET film_title = film.title
+		FROM film
+		WHERE film.film_id = detailed.film_id;
+		
+	UPDATE Detailed
+		SET latest_return = rental_dateonly(return_date)
+		FROM rental
+		WHERE rental.customer_id = detailed.detailed_customer_id
+		AND rental_dateonly(rental.rental_date) = detailed.latest_rental;
+END;
+$$;
+
+SELECT insert_data();
+--Section D End
+
+--Section E Start
+
+CREATE OR REPLACE FUNCTION summarize_report ()
+	RETURNS TRIGGER
+	LANGUAGE PLPGSQL
+AS
+$$
+	
+BEGIN
+	
+	INSERT INTO Summary(summary_customer_id, full_name, latest_rental, latest_return)
+	SELECT detailed_customer_id, full_name, latest_rental, latest_return
+	FROM detailed
+	ON CONFLICT (summary_customer_id)
+	DO UPDATE
+	SET summary_customer_id = (SELECT detailed_customer_id FROM detailed WHERE summary.full_name = detailed.full_name), 
+	    full_name = (SELECT full_name FROM detailed WHERE summary.summary_customer_id = detailed_customer_id) , 
+		latest_rental = (SELECT latest_rental FROM detailed WHERE summary.summary_customer_id = detailed_customer_id) ,
+		latest_return = (SELECT latest_return FROM detailed WHERE summary.summary_customer_id = detailed_customer_id) ;
+	RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER new_rent_or_return
+	AFTER INSERT OR UPDATE
+	ON detailed
+	EXECUTE PROCEDURE summarize_report();
+--Section E End
+
+--Section F Start
+
+CREATE OR REPLACE PROCEDURE refresh_report_tables()
+LANGUAGE plpgsql
+AS
+$$
+BEGIN
+DELETE FROM summary;
+DELETE FROM detailed;
+PERFORM insert_data();
+END;
+$$;
+
+-- F.1 You can utilize Sql Server Agent's job creation tool to run the procedure at a specified interval (eg. weekly in our case)
